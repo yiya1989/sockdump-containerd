@@ -55,7 +55,7 @@ end
 
 local function printJson(table, indent)
     if table == nil then
-        return nil
+        return ""
     end
     local json_data = json.encode(table, { indent = indent })
     -- print(json_data)
@@ -143,6 +143,32 @@ local function formatTimestamp(timestamp)
     return formattedString
 end
 
+ -- 将字节数组转换为十六进制字符串
+local function bytesToHexString(bytes)
+    local hexString = ""
+    for i = 1, #bytes do
+        hexString = hexString .. string.format("%02X", bytes[i])
+    end
+    return hexString
+ end
+ 
+ -- 将字符串转换为十六进制字符串
+ local function stringToHexString(str)
+    local hexString = ""
+    for i = 1, #str do
+        local byteValue = string.byte(str, i)
+        hexString = hexString .. string.format("%02X", byteValue)
+    end
+    return hexString
+ end
+
+-- 执行本地命令并获取输出
+local function executeCommand(command)
+    local file = io.popen(command)
+    local output = file:read("*a")
+    file:close()
+    return output
+end
 
 local formattedTime = formatTimestamp(timestamp)
 print(formattedTime)
@@ -177,14 +203,15 @@ resp_map["Stats"]="StatsResponse"
 resp_map["Connect"]="ConnectResponse"
 
 local msgTypeMap = {
-    [1] = "Request(0x01)",
-    [2] = "Response(0x02)",
-    [3] = "Stream(0x03)"
+    ["1"] = "Request(0x01)",
+    ["2"] = "Response(0x02)",
+    ["3"] = "Stream(0x03)"
 }
 
 -- 配置文件路径和消息类型
 -- local messageType = "containerd.task.v2.Task"
 local messageType = ""
+local unkonwn_method = "<unkonwn>"
 
 local dummy_proto = Proto("dummy", "Dummy Protocol")
 
@@ -198,11 +225,12 @@ local ttrpc_headerfield = ProtoField.bytes("dummy.header", "TTRPC Header")
 local ttrpc_data_field = ProtoField.bytes("dummy.data", "TTRPC Data")
 local ttrpc_method_field = ProtoField.string("dummy.method", "TTRPC Method")
 local ttrpc_req_field = ProtoField.string("dummy.req", "TTRPC Req")
+local ttrpc_resp_status_field = ProtoField.string("dummy.resp_status", "TTRPC Resp Rpc Status")
 local ttrpc_resp_field = ProtoField.string("dummy.resp", "TTRPC Resp")
 
 dummy_proto.fields = { dst_field, src_field, 
     ttrpc_len_field, ttrpc_stream_id_field, ttrpc_msg_type_field, ttrpc_flags_field, ttrpc_headerfield,
-    ttrpc_data_field, ttrpc_method_field, ttrpc_req_field, ttrpc_resp_field}
+    ttrpc_data_field, ttrpc_method_field, ttrpc_req_field, ttrpc_resp_status_field, ttrpc_resp_field}
 
 function dummy_proto.dissector(buf, pinfo, tree)
     local buf_len = buf:len()
@@ -223,8 +251,8 @@ function dummy_proto.dissector(buf, pinfo, tree)
     subtree:add(ttrpc_len_field, buf(16, 4))
     subtree:add(ttrpc_stream_id_field, stream_id)
 
-    local msg_type_int = buf(24, 1):uint()
-    subtree:add(ttrpc_msg_type_field, msgTypeMap[msg_type_int])
+    local msg_type = tostring(buf(24, 1):uint())
+    subtree:add(ttrpc_msg_type_field, msgTypeMap[msg_type])
     subtree:add(ttrpc_flags_field, buf(25, 1))
 
     local ttrpc_headerfield_data
@@ -249,86 +277,109 @@ function dummy_proto.dissector(buf, pinfo, tree)
     -- local buffer = ByteArray.new(buf(26):tvb():bytes())
 
     -- 解析二进制数据
+    local cmdPayloadStr = tostring(buf(26):tvb():bytes())
+    local stream_id_map = loadMapFromFile()
+    local method_name = "<unkonwn>"
+    local req = ""
+    local resp = ""
+    local status = ""
+
     local parsedData
-    if msg_type_int == 1 then 
+    if msg_type == "1" then 
         messageType = "ttrpc.Request"
         parsedData = parseBinaryData(messageType, packedBytes)
-    elseif msg_type_int == 2 then 
+    elseif msg_type == "2" then 
         messageType = "ttrpc.Response"
         parsedData = parseBinaryData(messageType, packedBytes)
     else
+        print("current unsupported msg_type: " .. msg_type)
         return
     end
 
-    local stream_id_map = loadMapFromFile()
-    local method_name
-    local req
-    local resp
-    -- showMap(stream_id_map)
     if parsedData.method ~= nil and parsedData.method ~= "" then
         -- print(parsedData.method)
         method_name = parsedData.method
         stream_id_map[stream_id_str] = method_name
-        -- print("req", stream_id_str, method_name)
-
-        -- print("stream_id_map", stream_id_map)
-        subtree:add(ttrpc_method_field, method_name)
-        -- -- messageType = parsedData.service
-        -- print(parsedData.service)
-        -- messageType = "task." ..  parsedData.method .. "Request"
-        messageType = req_map[parsedData.method]
-        if messageType ~= nil then
-            messageType = "task." .. messageType
-            local parsedData = parseBinaryData(messageType, parsedData.payload)
-            -- print(messageType, "===>")
-            -- printTable(parsedData)
-            req = printJson(parsedData)
-            subtree:add(ttrpc_req_field, req)
-        end
     else
         -- print(stream_id_str, type(stream_id_str))
         method_name = stream_id_map[stream_id_str]
         -- print("resp", stream_id_str, method_name)
-        if method_name ~= nil and method_name ~= "" then
-            subtree:add(ttrpc_method_field, method_name)
-            messageType = resp_map[method_name]
-            if messageType ~= nil then
-                messageType = "task." .. messageType
-                local parsedData = parseBinaryData(messageType, parsedData.payload)
-                -- print(messageType, "===>")
-                -- printTable(parsedData)
-                resp = printJson(parsedData)
-                -- print(resp)
-                subtree:add(ttrpc_resp_field, resp)
-            end
+        if method_name == nil then
+            method_name = unkonwn_method
         end
     end
     updateMapToFile(stream_id_map)
+    if method_name ~= nil then
+        subtree:add(ttrpc_method_field, method_name)
+    end
 
+    if method_name ~= nil and method_name ~= ""and method_name ~= unkonwn_method and cmdPayloadStr ~= "" then
+        local command = string.format(
+            "%s %s %s %s %s", 
+            "./containerdParser/ttrpc-parser", "0", msg_type, method_name, cmdPayloadStr
+        )
+        -- print(command)
+        local output = executeCommand(command)
+        -- print(output)
 
-    -- 使用命名占位符
-    local formattedString = string.format(
-        "%s, StreamId: %s, %s -> %s,\t Method: %6s, req: %s, resp: %s, stream: %s",
-        formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, method_name, req, resp, ""
-    )
+        -- 使用 dkjson.decode 解析 JSON 文本
+        local parsed_data, pos, err = json.decode(output, 1, nil)
+
+        -- 检查是否有错误
+        if err then
+            print("Json parse error:" .. err .. "output: " .. output)
+            error("Json parse error:" .. err .. "output: " .. output)
+            return
+        end
+
+        err = parsed_data.err
+        if err ~= nil and err ~= "" then
+            print("Go parse error::" .. err .. "output: " .. output)
+            error("Go parse error:" .. err .. "output: " .. output)
+            return
+        end
+
+        req = printJson(parsed_data.req)
+        resp = printJson(parsed_data.resp)
+        status = printJson(parsed_data.status)
+        -- print("parsed_data", parsed_data.method,  err, status, req, resp)
+        -- printTable(parsed_data)
+    end
+
+    local formattedString
+    if msg_type == "1" then 
+        subtree:add(ttrpc_req_field, req)
+        formattedString = string.format(
+            "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, req: %s",
+            formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, req
+        )
+    elseif msg_type == "2" then 
+        subtree:add(ttrpc_resp_status_field, status)
+        subtree:add(ttrpc_resp_field, resp)
+        if method_name == unkonwn_method then
+            formattedString = string.format(
+                "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, payload: %s",
+                formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, cmdPayloadStr
+            )
+        else
+            formattedString = string.format(
+                "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, resp: %s",
+                formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, resp
+            )
+        end
+    elseif msg_type == "3" then 
+        formattedString = string.format(
+            "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, stream: %s",
+            formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, ""
+        )
+    end
     print(formattedString)
-
+    
 end
 
 
--- print(package.path)
-
--- package.path = package.path .. ";/opt/homebrew//Cellar/protobuf/27.1/include/?.proto"
--- package.path = package.path .. ";/opt/homebrew//Cellar/protobuf/27.1/include/google/protobuf/?.proto"
--- package.cpath = package.cpath .. ";/opt/homebrew//Cellar/protobuf/27.1/include/?.proto"
--- package.cpath = package.cpath .. ";/opt/homebrew//Cellar/protobuf/27.1/include/google/protobuf/?.proto"
-
--- protoc:addpath("/opt/homebrew//Cellar/protobuf/27.1/include/")
--- protoc:addpath("/opt/homebrew//Cellar/protobuf/27.1/include/google/protobuf")
-
 -- 加载 proto 文件
-loadProto("/Users/admin/workspace/code/github/sockdump/wireshark/request.proto")
-loadProto("/Users/admin/workspace/code/github/sockdump/containerd/runtime/v2/task/shim.proto")
+loadProto("./containerdParser/pkg/request.proto")
 
 local wtap_encap_table = DissectorTable.get("wtap_encap")
 wtap_encap_table:add(wtap.USER0, dummy_proto)
