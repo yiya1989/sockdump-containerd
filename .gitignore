@@ -6,3 +6,7 @@ output.bin
 
 
 containerdParser/ttrpc-parser
+ttrpc-parser
+containerdParser/cache.*
+cache.*
+

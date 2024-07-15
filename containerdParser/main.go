@@ -3,24 +3,26 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/containerd/containerd/runtime/v2/task"
 	"github.com/containerd/ttrpc"
 	"github.com/gogo/protobuf/proto"
+	"github.com/shirou/gopsutil/v4/process"
+	"github.com/spf13/cobra"
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc/codes"
 
 	"containerdParser/pkg"
 )
 
-var req_map map[string]proto.Message
-var resp_map map[string]proto.Message
-
 func init() {
+	cfg = Cfg{}
 	req_map = map[string]proto.Message{}
 	resp_map = map[string]proto.Message{}
 
@@ -52,39 +54,44 @@ func init() {
 	resp_map["Connect"] = &task.ConnectResponse{}
 }
 
-func getArgs() (debug bool, msgType string, method string, payload string) {
-	var debugStr string
-	if len(os.Args) >= 2 {
-		debugStr = os.Args[1]
-	}
-	if len(os.Args) >= 3 {
-		msgType = os.Args[2]
-	}
-	if len(os.Args) >= 4 {
-		method = os.Args[3]
-	}
-	if len(os.Args) >= 5 {
-		payload = os.Args[4]
-	}
+type Cfg struct {
+	debug   bool
+	pppid   bool
+	msgType string
+	method  string
+	frame   string
+	ppid    string
+}
 
-	if debugStr == "" {
-		debugStr = os.Getenv("LUA_DEBUG")
-	}
-	if msgType == "" {
-		msgType = os.Getenv("LUA_MSGTYPE")
-	}
-	if method == "" {
-		method = os.Getenv("LUA_METHOD")
-	}
-	if payload == "" {
-		payload = os.Getenv("LUA_PAYLOAD")
-	}
+func (c Cfg) String() string {
+	return fmt.Sprintf("input args: debug: %t, msgType: %s, method: %s, frame: %s, ppid: %s",
+		cfg.debug, cfg.msgType, cfg.method, cfg.frame, cfg.ppid)
+}
 
-	if debugStr == "1" || debugStr == "true" {
-		debug = true
-	}
+var cfg Cfg
+var req_map map[string]proto.Message
+var resp_map map[string]proto.Message
 
-	return
+var rootCmd = &cobra.Command{
+	Use:   "ttrpc-parser",
+	Short: "ttrpc packet parser",
+	Long:  `ttrpc packet parser`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runCommand(cfg)
+	},
+}
+
+func RunCmd() Cfg {
+
+	rootCmd.PersistentFlags().BoolVarP(&cfg.debug, "debug", "d", false, "debug mode, show debug log")
+	rootCmd.PersistentFlags().BoolVarP(&cfg.pppid, "pppid", "", false, "default false. pppid mode will use pppid as uniq task id, otherwise use ppid")
+	rootCmd.PersistentFlags().StringVarP(&cfg.msgType, "msg_type", "t", "", "msg type: 0, 1, 2")
+	rootCmd.PersistentFlags().StringVarP(&cfg.method, "method", "m", "", "msg method, request will auto detect")
+	rootCmd.PersistentFlags().StringVarP(&cfg.frame, "frame", "f", "", "msg frame, include total ttrpc packet")
+	rootCmd.PersistentFlags().StringVarP(&cfg.ppid, "ppid", "p", "", "caller pid, it not defined, then auto detect")
+
+	rootCmd.Execute()
+	return cfg
 }
 
 func generatePayload(method string, req interface{}) ([]byte, error) {
@@ -109,94 +116,77 @@ func generatePayload(method string, req interface{}) ([]byte, error) {
 	return creqPayload, nil
 }
 
-func parsePayload(method string, payload []byte, msgType string) (req, resp proto.Message, Status *spb.Status, err error) {
+func parsePayload(method string, payload []byte, msgType string) (real_method string, req, resp proto.Message, Status *spb.Status, err error) {
 	codec := pkg.Codec{}
 
-	if msgType == "1" {
+	if msgType == "01" {
 		ttReq := &ttrpc.Request{}
 		err = codec.Unmarshal(payload, ttReq)
 		if err != nil {
-			return nil, nil, nil, err
+			return "", nil, nil, nil, err
 		}
 		dataReq, ok := req_map[ttReq.Method]
 		if !ok || dataReq == nil {
-			return nil, nil, nil, fmt.Errorf("cann't find method's request: %s", ttReq.Method)
+			return "", nil, nil, nil, fmt.Errorf("cann't find method's request: %s", ttReq.Method)
 		}
 		err = codec.Unmarshal(ttReq.Payload, dataReq)
 		if err != nil {
-			return nil, nil, nil, err
+			return "", nil, nil, nil, err
 		}
-		return dataReq, nil, nil, nil
-	} else if msgType == "2" {
+		return ttReq.Method, dataReq, nil, nil, nil
+	} else if msgType == "02" {
 		ttResp := &ttrpc.Response{}
 		err = codec.Unmarshal(payload, ttResp)
 		if err != nil {
-			return nil, nil, nil, err
+			return "", nil, nil, nil, err
 		}
 
 		if ttResp.Status != nil && ttResp.Status.Code != int32(codes.OK) {
-			return nil, nil, ttResp.Status, nil
+			return "", nil, nil, ttResp.Status, nil
 		}
 		dataResp, ok := resp_map[method]
 		if !ok || dataResp == nil {
-			return nil, nil, nil, fmt.Errorf("cann't find method's response: %s", method)
+			return "", nil, nil, nil, fmt.Errorf("cann't find method's response: %s", method)
 		}
 		err = codec.Unmarshal(ttResp.Payload, dataResp)
 		if err != nil {
-			return nil, nil, nil, err
+			return "", nil, nil, nil, err
 		}
-		return nil, dataResp, ttResp.Status, nil
+		return method, nil, dataResp, ttResp.Status, nil
 	} else {
-		return nil, nil, nil, fmt.Errorf("unsupported msg type: %s", msgType)
+		return method, nil, nil, nil, fmt.Errorf("unsupported msg type: %s", msgType)
 	}
 }
 
-func parseAndShowPayload(method string, payloadStr string, msgType string) (result Result) {
+func parsePayloadWrap(method string, payloadStr string, msgType string) (real_method string, req, resp proto.Message, status *spb.Status, err error) {
 
 	if len(payloadStr) == 0 {
-		errMsg := "payload is empty"
-		log.Printf(errMsg)
-		result.Err = errMsg
-		return
+		// fill method
+		return "", nil, nil, nil, nil
 	}
 
 	if len(msgType) == 0 {
-		errMsg := "msgType is empty"
-		log.Printf(errMsg)
-		result.Err = errMsg
-		return
+		return "", nil, nil, nil, errors.New("msgType is empty")
 	}
 
 	payload, err := hex.DecodeString(payloadStr)
 	if err != nil {
-		errMsg := fmt.Sprintf("hex.DecodeString payload failed, err: %s", err.Error())
-		log.Printf(errMsg)
-		result.Err = errMsg
-		return
+		return "", nil, nil, nil, fmt.Errorf("hex.DecodeString payload failed, err: %s", err.Error())
 	}
 
-	dateReq, dataResp, status, err := parsePayload(method, payload, msgType)
+	real_method, req, resp, status, err = parsePayload(method, payload, msgType)
 	if err != nil {
-		errMsg := fmt.Sprintf("parsePayload failed: %s", err.Error())
-		log.Printf(errMsg)
-		result.Err = errMsg
-		return
+		return "", nil, nil, nil, fmt.Errorf("parsePayload failed: %s", err.Error())
 	}
 	log.Printf("status: %s", status.String())
-	if dateReq != nil {
-		log.Printf("dateReq: %s, ", dateReq.String())
+	if req != nil {
+		log.Printf("req: %s, ", req.String())
 	}
-	if dataResp != nil {
-		log.Printf("dataResp: %s, ", dataResp.String())
-	}
-	result = Result{
-		Method: method,
-		Req:    dateReq,
-		Resp:   dataResp,
-		Status: status,
+	if resp != nil {
+		log.Printf("resp: %s, ", resp.String())
 	}
 
-	return result
+	return real_method, req, resp, status, nil
 }
 
 func testGenerateParse() {
@@ -211,26 +201,137 @@ func testGenerateParse() {
 	creqHexString := hex.EncodeToString(creqPayload)
 	log.Printf("creqHexString: %s", creqHexString)
 
-	parseAndShowPayload("Wait", creqHexString, "1")
+	parsePayloadWrap("Wait", string(creqHexString), "1")
+}
+
+type CacheMgr struct {
+	TaskId string
+	cache  map[string]string
+}
+
+func (c CacheMgr) cacheFile() string {
+	return fmt.Sprintf("cache.%s", c.TaskId)
+}
+
+func (c *CacheMgr) Get(key string) string {
+	if c.cache == nil {
+		c.cache = make(map[string]string)
+	}
+	return c.cache[key]
+}
+
+func (c *CacheMgr) Add(key, value string) {
+	if c.cache == nil {
+		c.cache = make(map[string]string)
+	}
+	c.cache[key] = value
+}
+
+func (c *CacheMgr) Save() error {
+	content, err := json.Marshal(c.cache)
+	if err != nil {
+		return err
+	}
+
+	// 写入内容到文件，如果文件不存在则创建
+	err = os.WriteFile(c.cacheFile(), content, 0666)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %v", err)
+	}
+	return nil
+}
+func (c *CacheMgr) Load() error {
+	// 写入内容到文件，如果文件不存在则创建
+	content, err := os.ReadFile(c.cacheFile())
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.cache = make(map[string]string)
+			return nil
+		}
+		return fmt.Errorf("failed to write file: %v", err)
+	}
+
+	return json.Unmarshal(content, &c.cache)
 }
 
 type Result struct {
-	Method string        `json:"method"`
-	Req    proto.Message `json:"req"`
-	Resp   proto.Message `json:"resp"`
-	Status *spb.Status   `json:"status"`
-	Err    string        `json:"err"`
+	TaskId     string        `json:"task_id"`
+	DataLength uint64        `json:"data_length"`
+	StreamID   string        `json:"stream_id"`
+	MsgType    string        `json:"msg_type"`
+	MsgFlags   string        `json:"msg_flags"`
+	Method     string        `json:"method"`
+	Req        proto.Message `json:"req"`
+	Resp       proto.Message `json:"resp"`
+	Status     *spb.Status   `json:"status"`
+	Err        string        `json:"err"`
 }
 
-func main() {
-	//for local generate and reparse
-	// testGenerateParse()
+func parseFrameHeader(hexFrame string) (dataLength uint64, streamId string, msgType string, msgFlags string, payload []byte, err error) {
+	// examle: 0000008a 00001893 01 00
+	if len(hexFrame) < 20 {
+		return 0, "", "", "", nil, fmt.Errorf("frame error, ttrpc frame min lenth should be 20 hex string")
+	}
 
-	debug, msgType, method, payload := getArgs()
-	if !debug {
+	// dataLength, err = hex.DecodeString(hexFrame[:8])
+	dataLength, err = strconv.ParseUint(hexFrame[:8], 16, 64)
+	if err != nil {
+		return 0, "", "", "", nil, fmt.Errorf("hex.dataLength payload failed, hexString: %s, err: %s", hexFrame[:8], err.Error())
+	}
+
+	streamId = hexFrame[8:16]
+	msgType = hexFrame[16:18]
+	msgFlags = hexFrame[18:20]
+
+	payload = []byte(hexFrame[20:])
+	return
+}
+
+func get_cap_task_ppid(cfg Cfg) (pidStr string, err error) {
+	ppid := os.Getppid()
+	log.Printf("parentpid: %d", ppid)
+
+	if cfg.pppid {
+		p, err := process.NewProcess(int32(ppid))
+		if err != nil {
+			return "", err
+		}
+
+		pppid, err := p.Ppid()
+		if err != nil {
+			return "", err
+		}
+		ppid = int(pppid)
+		log.Printf("wireshark mode, use parentpid's parentpid: %d", ppid)
+	}
+	pidStr = fmt.Sprintf("%d", ppid)
+
+	return
+}
+
+func showResult(result Result, err error) {
+	if err != nil {
+		result.Err = err.Error()
+		log.Print(err)
+	}
+
+	log.Printf("result: %#v", result)
+	bytes, err := json.Marshal(result)
+	if err != nil {
+		log.Printf("{\"err\": %s}", err.Error())
+		return
+	}
+	fmt.Println(string(bytes))
+}
+
+func runCommand(cfg Cfg) error {
+	if !cfg.debug {
 		log.SetOutput(io.Discard)
 	}
-	log.Printf("input args: debug: %t, msgType: %s, method: %s, payload: %s", debug, msgType, method, payload)
+	log.Print(cfg.String())
+
+	//for local generate and reparse
+	// testGenerateParse()
 
 	// method = "Wait"
 	// msgType = "1"
@@ -240,12 +341,69 @@ func main() {
 	// msgType = "2"
 	// payload = "120F0809120B089FFCBDB40610DDD4EB12"
 
-	result := parseAndShowPayload(method, payload, msgType)
-	log.Printf("result: %#v", result)
-	bytes, err := json.Marshal(result)
+	// 0000008a0000189301000a17636f6e7461696e6572642e7461736b2e76322e5461736b120553746174731a420a40623063613530666438633236363134373561346631336636383864636163623365636433643936383263636264333030613538336364646161646638376131342a240a1a636f6e7461696e6572642d6e616d6573706163652d747472706312066b38732e696f
+
+	var result Result
+
+	ppid, err := get_cap_task_ppid(cfg)
 	if err != nil {
-		log.Printf("{\"err\": %s}", err.Error())
-		return
+		errWrap := fmt.Errorf("parseFrameHeader err: %s", err.Error())
+		showResult(result, errWrap)
+		return nil
 	}
-	fmt.Println(string(bytes))
+	log.Printf("ppid: %s", ppid)
+
+	cacheMgr := CacheMgr{
+		TaskId: ppid,
+	}
+	if err := cacheMgr.Load(); err != nil {
+		showResult(result, fmt.Errorf("load task cache failed, err: %w", err))
+		return nil
+	}
+
+	dataLength, streamId, msgType, msgFlags, payload, err := parseFrameHeader(cfg.frame)
+	result = Result{
+		TaskId:     ppid,
+		DataLength: dataLength,
+		StreamID:   streamId,
+		MsgType:    msgType,
+		MsgFlags:   msgFlags,
+	}
+	if err != nil {
+		errWrap := fmt.Errorf("parseFrameHeader err: %s", err.Error())
+		showResult(result, errWrap)
+		return nil
+	}
+
+	input_method := cacheMgr.Get(streamId)
+	if cfg.method != "" {
+		input_method = cfg.method
+	}
+	method, req, resp, status, err := parsePayloadWrap(input_method, string(payload), string(msgType))
+	if err != nil {
+		errWrap := fmt.Errorf("parsePayload err: %s", err.Error())
+		showResult(result, errWrap)
+		return nil
+	}
+	result.Method = method
+	result.Req = req
+	result.Resp = resp
+	result.Status = status
+
+	if result.Method != "" {
+		cacheMgr.Add(streamId, result.Method)
+	}
+	if err := cacheMgr.Save(); err != nil {
+		showResult(result, fmt.Errorf("save task cache failed, err: %w", err))
+		return nil
+	}
+
+	showResult(result, nil)
+	return nil
+}
+
+func main() {
+
+	_ = RunCmd()
+
 }

@@ -299,6 +299,10 @@ def hex_print(data):
         line += ''.join(ascii(x) for x in data[i:i+16])
         print(line)
 
+def get_hexstring(data):
+    chunks = ['{:02x}'.format(i) for i in bytes(data)]
+    print(''.join(chunks))
+
 def hexstring_print(data):
     chunks = ['\\x{:02x}'.format(i) for i in bytes(data)]
     print(''.join(chunks))
@@ -309,6 +313,18 @@ def hex_output(cpu, event, size):
     if packet.flags & SS_PACKET_F_ERR:
         print('error')
     hex_print(data)
+
+def ttcp_output(cpu, event, size):
+    packet, data = parse_event(event, size)
+    print_header(packet, data)
+    if packet.flags & SS_PACKET_F_ERR:
+        print('error')
+    data_length = get_hexstring(data[0:4])
+    stream_id = get_hexstring(data[4:8])
+    msg_type = get_hexstring(data[8:9])
+    msg_flags = get_hexstring(data[9:10])
+    hexstring = get_hexstring(data[10:])
+    print(data_length, stream_id, msg_type, msg_flags, hexstring)
 
 def hexstring_output(cpu, event, size):
     packet, data = parse_event(event, size)
@@ -343,6 +359,7 @@ outputs = {
     'hexstring': hexstring_output,
     'string': string_output,
     'pcap': pcap_output,
+    'ttcp': ttcp_output,
 }
 
 def sig_handler(signum, stack):
