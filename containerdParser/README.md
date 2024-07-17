@@ -15,7 +15,10 @@ TTRPC is used for containerd-shim <-> containerd communication.
 ./sockdump.py /run/containerd/s/22b4cfa50741b1a0f8645eba9fdccbdde84e0ea9d02cfbb498e36dba8be2fc32 --format pcap --output dump.pcap
 
 cd containerdParser
-go build -o ttrpc-parser main.go
+make linux-amd64
+#make linux-arm64
+#make mac-amd64
+#make mac-arm64
 cd ../
 
 wireshark -X lua_script:containerdParser/ttrpc.lua dump.pcap
