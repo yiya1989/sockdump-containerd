@@ -212,7 +212,8 @@ local msgTypeMap = {
 -- 配置文件路径和消息类型
 -- local messageType = "containerd.task.v2.Task"
 local messageType = ""
-local unkonwn_method = "<unkonwn>"
+local unkonwn_method = "unknown"
+local stream_method = {}
 
 local dummy_proto = Proto("dummy", "Dummy Protocol")
 
@@ -279,37 +280,49 @@ function dummy_proto.dissector(buf, pinfo, tree)
 
     -- 检查是否有错误
     if err then
-        print("Json parse error:" .. err .. "output: " .. output)
-        error("Json parse error:" .. err .. "output: " .. output)
+        print("Json parse error:" .. err .. ", output: " .. output .. ", command: " ..command)
+        error("Json parse error:" .. err .. ", output: " .. output .. ", command: " ..command)
         return
     end
+
+    local method
+    local req
+    local resp
+    local status
 
     err = parsed_data.err
     if err ~= nil and err ~= "" then
-        print("Go parse error::" .. err .. "output: " .. output)
-        error("Go parse error:" .. err .. "output: " .. output)
-        return
+        -- print("Go parse error::" .. err .. "output: " .. output)
+        -- error("Go parse error:" .. err .. "output: " .. output)
+    else
+        -- local task_id = printJson(parsed_data.task_id)
+        -- local data_length = printJson(parsed_data.data_length)
+        -- local stream_id = printJson(parsed_data.stream_id)
+        -- local msg_type = printJson(parsed_data.msg_type)
+        -- local msg_flags = printJson(parsed_data.msg_flags)
+        method = parsed_data.method
+        req = printJson(parsed_data.req)
+        resp = printJson(parsed_data.resp)
+        status = printJson(parsed_data.status)
+        -- print("parsed_data", parsed_data.method,  err, status, req, resp)
     end
 
-    -- local task_id = printJson(parsed_data.task_id)
-    -- local data_length = printJson(parsed_data.data_length)
-    -- local stream_id = printJson(parsed_data.stream_id)
-    -- local msg_type = printJson(parsed_data.msg_type)
-    -- local msg_flags = printJson(parsed_data.msg_flags)
-    local method = parsed_data.method
-    local req = printJson(parsed_data.req)
-    local resp = printJson(parsed_data.resp)
-    local status = printJson(parsed_data.status)
-    -- print("parsed_data", parsed_data.method,  err, status, req, resp)
-
-    local method_name = "<unkonwn>"
+    local method_name = unkonwn_method
     if method ~= nil and method ~= "" then
         method_name = method
+        stream_method[stream_id_str] = method_name
+        stream_method_json = printJson(stream_method)
+        -- print(stream_method_json)
     end
     subtree:add(ttrpc_method_field, method_name)
 
     local formattedString
-    if msg_type == "1" then 
+    if method_name == unkonwn_method or (err ~= nil and err ~= "") then
+        formattedString = string.format(
+            "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, resp: %s, status: %s, err: %s, payload: %s",
+            formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, resp, status, err, cmdPayloadStr
+        )
+    elseif msg_type == "1" then 
         subtree:add(ttrpc_req_field, req)
         formattedString = string.format(
             "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, req: %s",
@@ -318,17 +331,10 @@ function dummy_proto.dissector(buf, pinfo, tree)
     elseif msg_type == "2" then 
         subtree:add(ttrpc_resp_status_field, status)
         subtree:add(ttrpc_resp_field, resp)
-        if method_name == unkonwn_method then
-            formattedString = string.format(
-                "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, payload: %s",
-                formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, cmdPayloadStr
-            )
-        else
-            formattedString = string.format(
+        formattedString = string.format(
                 "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, resp: %s",
                 formatTimestamp(pinfo.abs_ts), stream_id_str, src, dst, msg_type, method_name, resp
-            )
-        end
+        )
     elseif msg_type == "3" then 
         formattedString = string.format(
             "%s, StreamId: %s, %s -> %s,\t %s Method: %9s, stream: %s",

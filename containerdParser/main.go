@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/containerd/containerd/runtime/v2/task"
 	"github.com/containerd/ttrpc"
@@ -67,6 +68,8 @@ func (c Cfg) String() string {
 	return fmt.Sprintf("input args: debug: %t, msgType: %s, method: %s, frame: %s, ppid: %s",
 		cfg.debug, cfg.msgType, cfg.method, cfg.frame, cfg.ppid)
 }
+
+const guessMethodPrifix = "guess_"
 
 var cfg Cfg
 var req_map map[string]proto.Message
@@ -138,19 +141,39 @@ func parsePayload(method string, payload []byte, msgType string) (real_method st
 		ttResp := &ttrpc.Response{}
 		err = codec.Unmarshal(payload, ttResp)
 		if err != nil {
-			return "", nil, nil, nil, err
+			return method, nil, nil, nil, err
 		}
 
 		if ttResp.Status != nil && ttResp.Status.Code != int32(codes.OK) {
-			return "", nil, nil, ttResp.Status, nil
+			return method, nil, nil, ttResp.Status, nil
 		}
-		dataResp, ok := resp_map[method]
-		if !ok || dataResp == nil {
-			return "", nil, nil, nil, fmt.Errorf("cann't find method's response: %s", method)
+
+		if len(method) == 0 && len(ttResp.Payload) == 0 {
+			return method, nil, nil, nil, nil
+			// return method, nil, nil, nil, errors.New("method name for response is necessary")
 		}
+
+		var dataResp proto.Message
+		if len(method) != 0 && !strings.HasPrefix(method, guessMethodPrifix) {
+			dataRespTmp, ok := resp_map[method]
+			if !ok || dataRespTmp == nil {
+				return method, nil, nil, nil, fmt.Errorf("cann't find method's response struct: %s", method)
+			}
+			dataResp = dataRespTmp
+		} else {
+			for key, value := range resp_map {
+				err = codec.Unmarshal(ttResp.Payload, value)
+				if err != nil {
+					continue
+				}
+				method = guessMethodPrifix + key
+				dataResp = value
+			}
+		}
+
 		err = codec.Unmarshal(ttResp.Payload, dataResp)
 		if err != nil {
-			return "", nil, nil, nil, err
+			return method, nil, nil, nil, err
 		}
 		return method, nil, dataResp, ttResp.Status, nil
 	} else {
@@ -162,7 +185,10 @@ func parsePayloadWrap(method string, payloadStr string, msgType string) (real_me
 
 	if len(payloadStr) == 0 {
 		// fill method
-		return "", nil, nil, nil, nil
+		if method == "" {
+			method = "unknown_empty"
+		}
+		return method, nil, nil, nil, nil
 	}
 
 	if len(msgType) == 0 {
@@ -207,6 +233,11 @@ func testGenerateParse() {
 type CacheMgr struct {
 	TaskId string
 	cache  map[string]string
+}
+
+func (c CacheMgr) String() string {
+	b, _ := json.Marshal(c.cache)
+	return string(b)
 }
 
 func (c CacheMgr) cacheFile() string {
@@ -360,6 +391,7 @@ func runCommand(cfg Cfg) error {
 		showResult(result, fmt.Errorf("load task cache failed, err: %w", err))
 		return nil
 	}
+	// println(cacheMgr.String())
 
 	dataLength, streamId, msgType, msgFlags, payload, err := parseFrameHeader(cfg.frame)
 	result = Result{
@@ -380,15 +412,15 @@ func runCommand(cfg Cfg) error {
 		input_method = cfg.method
 	}
 	method, req, resp, status, err := parsePayloadWrap(input_method, string(payload), string(msgType))
+	result.Method = method
+	result.Req = req
+	result.Resp = resp
+	result.Status = status
 	if err != nil {
 		errWrap := fmt.Errorf("parsePayload err: %s", err.Error())
 		showResult(result, errWrap)
 		return nil
 	}
-	result.Method = method
-	result.Req = req
-	result.Resp = resp
-	result.Status = status
 
 	if result.Method != "" {
 		cacheMgr.Add(streamId, result.Method)

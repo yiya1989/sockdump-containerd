@@ -32,3 +32,5 @@ require (
 	google.golang.org/genproto v0.0.0-20201110150050-8816d57aaa9a
 	google.golang.org/grpc v1.33.2
 )
+
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20200224152610-e50cd9704f63
