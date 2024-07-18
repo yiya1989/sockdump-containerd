@@ -51,6 +51,18 @@
                 "-m",
                 ""
             ]
+        },
+        {
+            "name": "guess_method",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "containerdParser/main.go",
+            "args": [
+                "-d",
+                "-f",
+                "0000001200000005020012100809120c08f5d6d8b406108e9ffaba02",
+            ]
         }
     ]
 }
