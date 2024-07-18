@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -69,6 +70,19 @@ func (c Cfg) String() string {
 		cfg.debug, cfg.msgType, cfg.method, cfg.frame, cfg.ppid)
 }
 
+func getUnrecognized(input interface{}) []byte {
+	value := reflect.ValueOf(input).Elem()
+	fieldValue := value.FieldByName("XXX_unrecognized")
+	if !fieldValue.CanInterface() {
+		return nil
+	}
+	result, ok := fieldValue.Interface().([]byte)
+	if ok {
+		log.Printf("getUnrecognized data: %v", result)
+	}
+	return result
+}
+
 const guessMethodPrifix = "guess_"
 
 var cfg Cfg
@@ -97,6 +111,11 @@ func RunCmd() Cfg {
 	return cfg
 }
 
+func getString(input interface{}) []byte {
+	b, _ := json.Marshal(input)
+	return b
+}
+
 func generatePayload(method string, req interface{}) ([]byte, error) {
 	codec := pkg.Codec{}
 
@@ -119,7 +138,7 @@ func generatePayload(method string, req interface{}) ([]byte, error) {
 	return creqPayload, nil
 }
 
-func parsePayload(method string, payload []byte, msgType string) (real_method string, req, resp proto.Message, Status *spb.Status, err error) {
+func parsePayload(method string, payload []byte, msgType string) (real_method string, req, resp []byte, Status *spb.Status, err error) {
 	codec := pkg.Codec{}
 
 	if msgType == "01" {
@@ -136,7 +155,7 @@ func parsePayload(method string, payload []byte, msgType string) (real_method st
 		if err != nil {
 			return "", nil, nil, nil, err
 		}
-		return ttReq.Method, dataReq, nil, nil, nil
+		return ttReq.Method, getString(dataReq), nil, nil, nil
 	} else if msgType == "02" {
 		ttResp := &ttrpc.Response{}
 		err = codec.Unmarshal(payload, ttResp)
@@ -150,38 +169,48 @@ func parsePayload(method string, payload []byte, msgType string) (real_method st
 
 		if len(method) == 0 && len(ttResp.Payload) == 0 {
 			return method, nil, nil, nil, nil
-			// return method, nil, nil, nil, errors.New("method name for response is necessary")
+			// return method, "", "", nil, errors.New("method name for response is necessary")
 		}
 
-		var dataResp proto.Message
 		if len(method) != 0 && !strings.HasPrefix(method, guessMethodPrifix) {
-			dataRespTmp, ok := resp_map[method]
-			if !ok || dataRespTmp == nil {
+			dataResp, ok := resp_map[method]
+			if !ok || dataResp == nil {
 				return method, nil, nil, nil, fmt.Errorf("cann't find method's response struct: %s", method)
 			}
-			dataResp = dataRespTmp
+			err = codec.Unmarshal(ttResp.Payload, dataResp)
+			if err != nil {
+				return method, nil, nil, nil, err
+			}
+			return method, nil, getString(dataResp), ttResp.Status, nil
 		} else {
+			var matchedMethod []string
+			dataResp := map[string]interface{}{}
 			for key, value := range resp_map {
 				err = codec.Unmarshal(ttResp.Payload, value)
 				if err != nil {
 					continue
 				}
-				method = guessMethodPrifix + key
-				dataResp = value
+				unrecognized := getUnrecognized(value)
+				if len(unrecognized) > 0 {
+					continue
+				}
+				matchedMethod = append(matchedMethod, key)
+				dataResp[key] = value
 			}
+			if len(dataResp) == 0 {
+				return method, nil, nil, nil, fmt.Errorf("cann't guess any method's response struct")
+			}
+			method = guessMethodPrifix + strings.Join(matchedMethod, "_")
+			resp = getString(dataResp)
+			return method, nil, resp, ttResp.Status, nil
 		}
 
-		err = codec.Unmarshal(ttResp.Payload, dataResp)
-		if err != nil {
-			return method, nil, nil, nil, err
-		}
-		return method, nil, dataResp, ttResp.Status, nil
 	} else {
 		return method, nil, nil, nil, fmt.Errorf("unsupported msg type: %s", msgType)
 	}
 }
 
-func parsePayloadWrap(method string, payloadStr string, msgType string) (real_method string, req, resp proto.Message, status *spb.Status, err error) {
+func parsePayloadWrap(method string, payloadStr string, msgType string) (real_method string, req, resp []byte, status *spb.Status, err error) {
 
 	if len(payloadStr) == 0 {
 		// fill method
@@ -206,10 +235,10 @@ func parsePayloadWrap(method string, payloadStr string, msgType string) (real_me
 	}
 	log.Printf("status: %s", status.String())
 	if req != nil {
-		log.Printf("req: %s, ", req.String())
+		log.Printf("req: %s, ", req)
 	}
 	if resp != nil {
-		log.Printf("resp: %s, ", resp.String())
+		log.Printf("resp: %s, ", resp)
 	}
 
 	return real_method, req, resp, status, nil
@@ -286,16 +315,16 @@ func (c *CacheMgr) Load() error {
 }
 
 type Result struct {
-	TaskId     string        `json:"task_id"`
-	DataLength uint64        `json:"data_length"`
-	StreamID   string        `json:"stream_id"`
-	MsgType    string        `json:"msg_type"`
-	MsgFlags   string        `json:"msg_flags"`
-	Method     string        `json:"method"`
-	Req        proto.Message `json:"req"`
-	Resp       proto.Message `json:"resp"`
-	Status     *spb.Status   `json:"status"`
-	Err        string        `json:"err"`
+	TaskId     string          `json:"task_id"`
+	DataLength uint64          `json:"data_length"`
+	StreamID   string          `json:"stream_id"`
+	MsgType    string          `json:"msg_type"`
+	MsgFlags   string          `json:"msg_flags"`
+	Method     string          `json:"method"`
+	Req        json.RawMessage `json:"req"`
+	Resp       json.RawMessage `json:"resp"`
+	Status     *spb.Status     `json:"status"`
+	Err        string          `json:"err"`
 }
 
 func parseFrameHeader(hexFrame string) (dataLength uint64, streamId string, msgType string, msgFlags string, payload []byte, err error) {
@@ -346,9 +375,9 @@ func showResult(result Result, err error) {
 		log.Print(err)
 	}
 
-	log.Printf("result: %#v", result)
 	bytes, err := json.Marshal(result)
 	if err != nil {
+		log.Printf("result: %#v", result)
 		log.Printf("{\"err\": %s}", err.Error())
 		return
 	}
@@ -413,8 +442,8 @@ func runCommand(cfg Cfg) error {
 	}
 	method, req, resp, status, err := parsePayloadWrap(input_method, string(payload), string(msgType))
 	result.Method = method
-	result.Req = req
-	result.Resp = resp
+	result.Req = json.RawMessage(req)
+	result.Resp = json.RawMessage(resp)
 	result.Status = status
 	if err != nil {
 		errWrap := fmt.Errorf("parsePayload err: %s", err.Error())
